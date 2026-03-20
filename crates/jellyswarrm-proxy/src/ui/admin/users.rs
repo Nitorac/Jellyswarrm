@@ -306,7 +306,7 @@ pub async fn delete_user(
     Form(form): Form<DeleteUserForm>,
 ) -> Response {
     // 1. Get user to get username for remote deletion
-    let username = match state.user_authorization.get_user_by_id(&user_id).await {
+    let _username = match state.user_authorization.get_user_by_id(&user_id).await {
         Ok(Some(u)) => u.original_username,
         Ok(None) => {
             return (
@@ -327,12 +327,16 @@ pub async fn delete_user(
 
     // 2. Delete from federated servers if requested
     let report = if form.delete_federated {
+        /*
         Some(
             state
                 .federated_users
                 .delete_user_from_all_servers(&username)
                 .await,
         )
+        */
+        error!("Disable federated user delete to avoid miss-manipulations.");
+        None
     } else {
         None
     };

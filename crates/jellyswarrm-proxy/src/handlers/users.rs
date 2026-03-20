@@ -15,6 +15,8 @@ use crate::{
 };
 
 use anyhow::Result;
+use async_recursion::async_recursion;
+use axum::http::HeaderValue;
 
 async fn process_user(
     server_user: crate::models::User,
@@ -101,7 +103,7 @@ pub async fn handle_get_user_by_id(
     Ok(Json(server_user))
 }
 
-// Authenticates a user by trying all configured servers in parallel
+#[async_recursion] // Authenticates a user by trying all configured servers in parallel
 pub async fn handle_authenticate_by_name(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -270,6 +272,32 @@ pub async fn handle_authenticate_by_name(
             successful_auths.len(),
             total_servers
         );
+
+        let auth_retries = headers
+            .get("X-Auth-Retries")
+            .map(|v| v.to_str())
+            .transpose()
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+            .map(|str| str.parse::<u32>())
+            .transpose()
+            .map_err(|_| StatusCode::EXPECTATION_FAILED)?
+            .unwrap_or_default();
+
+        if auth_retries > 5 {
+            error!("Unable to create federated user account on all servers.");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        if successful_auths.len() < total_servers {
+            info!("User does not have an account on all servers, retrying ...");
+            let mut new_headers = headers.clone();
+            new_headers.insert(
+                "X-Auth-Retries",
+                HeaderValue::from_str(&format!("{}", auth_retries + 1)).unwrap(),
+            );
+            return handle_authenticate_by_name(State(state), new_headers, Json(payload)).await;
+        }
+
         Ok(Json(auth_response))
     }
 }
@@ -279,14 +307,21 @@ async fn resolve_or_create_login_user(
     username: &str,
     password: &Password,
 ) -> Result<crate::user_authorization_service::User, StatusCode> {
-    state
+    let created_user = state
         .user_authorization
         .get_or_create_user(username, password)
         .await
         .map_err(|e| {
             tracing::error!("Error resolving local user for login: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })
+        })?;
+
+    let _ = state
+        .federated_users
+        .sync_user_to_all_servers(username, password, &created_user.id)
+        .await;
+
+    Ok(created_user)
 }
 
 async fn persist_successful_auths(
